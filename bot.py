@@ -12,6 +12,7 @@ intents = discord.Intents.default()
 intents.voice_states = True
 intents.guilds = True
 intents.message_content = True
+intents.members = True
 
 bot = commands.Bot(command_prefix=[".v ", ".v"], intents=intents)
 
@@ -94,11 +95,14 @@ class LimitModal(discord.ui.Modal, title='Set User Limit'):
         except discord.errors.HTTPException:
             await interaction.response.send_message("Failed to change limit.", ephemeral=True)
 
+class OwnerMenuView(discord.ui.View):
+    def __init__(self, channel: discord.VoiceChannel):
+        super().__init__(timeout=300)
+        self.channel = channel
+
 class VoiceControlView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        # Adding URL button manually since discord.py url buttons don't use callbacks
-        self.add_item(discord.ui.Button(label="Rules", style=discord.ButtonStyle.link, url="https://discord.com/terms", row=3))
 
     async def _check_owner(self, interaction: discord.Interaction):
         if not interaction.user.voice or not interaction.user.voice.channel:
@@ -114,8 +118,12 @@ class VoiceControlView(discord.ui.View):
                 await interaction.response.send_message("You are not in a temporary voice channel.", ephemeral=True)
                 return None, False
                 
-            if row[0] != interaction.user.id and not interaction.user.guild_permissions.administrator:
-                await interaction.response.send_message("You do not own this temporary channel.", ephemeral=True)
+            is_actual_owner = (row[0] == interaction.user.id)
+            is_admin = interaction.user.guild_permissions.administrator
+            is_co_owner = channel.permissions_for(interaction.user).move_members
+
+            if not (is_actual_owner or is_admin or is_co_owner):
+                await interaction.response.send_message("You do not own or manage this temporary channel.", ephemeral=True)
                 return channel, False
                 
         return channel, True
@@ -174,6 +182,18 @@ class VoiceControlView(discord.ui.View):
                 return
             await db.execute('UPDATE temp_channels SET owner_id = ? WHERE channel_id = ?', (interaction.user.id, channel.id))
             await db.commit()
+            
+        # Update permissions
+        overrides = channel.overwrites
+        # Remove old owner's admin-like powers if they were explicitly set
+        old_owner = interaction.guild.get_member(owner_id)
+        if old_owner and old_owner in overrides:
+            overrides[old_owner].move_members = None
+            
+        # Give new owner powers
+        overrides[interaction.user] = discord.PermissionOverwrite(connect=True, move_members=True)
+        await channel.edit(overwrites=overrides)
+        
         await interaction.response.send_message("👑 You are now the owner of this channel.", ephemeral=True)
 
     @discord.ui.button(emoji="🚫", style=discord.ButtonStyle.secondary, custom_id="vc_hide", row=0)
@@ -220,15 +240,19 @@ class VoiceControlView(discord.ui.View):
         await channel.edit(user_limit=new_limit)
         await interaction.response.send_message(f"Limit decreased to {new_limit}.", ephemeral=True)
 
-    @discord.ui.button(emoji="🗑️", style=discord.ButtonStyle.secondary, custom_id="vc_delete", row=1)
-    async def delete_vc(self, interaction: discord.Interaction, button: discord.ui.Button):
-        channel, is_owner = await self._check_owner(interaction)
-        if not channel or not is_owner: return
-        await interaction.response.send_message("Deleting channel...", ephemeral=True)
-        await channel.delete()
+    @discord.ui.button(emoji="👑", label="Owner", style=discord.ButtonStyle.danger, custom_id="vc_owner_menu", row=1)
+    async def owner_menu(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel, is_allowed = await self._check_owner(interaction)
+        if not channel or not is_allowed: return
+        
         async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute('DELETE FROM temp_channels WHERE channel_id = ?', (channel.id,))
-            await db.commit()
+            cursor = await db.execute('SELECT owner_id FROM temp_channels WHERE channel_id = ?', (channel.id,))
+            row = await cursor.fetchone()
+            if row and row[0] != interaction.user.id and not interaction.user.guild_permissions.administrator:
+                return await interaction.response.send_message("❌ Only the primary channel owner can open the owner menu.", ephemeral=True)
+
+        embed = discord.Embed(title="👑 Owner Settings", description="These options are only visible to you.", color=0x2b2d31)
+        await interaction.response.send_message(embed=embed, view=OwnerMenuView(channel), ephemeral=True)
 
     @discord.ui.button(emoji="✏️", style=discord.ButtonStyle.secondary, custom_id="vc_rename", row=1)
     async def rename(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -273,9 +297,32 @@ class VoiceControlView(discord.ui.View):
             
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="Get Music Bot", style=discord.ButtonStyle.primary, custom_id="vc_music", row=2)
+    @discord.ui.button(label="Rules", emoji="📜", style=discord.ButtonStyle.primary, custom_id="vc_rules", row=2)
+    async def rules(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(f"📜 Please read the rules in <#1426676905201106964>.", ephemeral=True)
+
+    @discord.ui.button(label="Summon Muziq", emoji="🎸", style=discord.ButtonStyle.primary, custom_id="vc_music", row=2)
     async def music_bot(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("Here is the link to add the music bot: https://example.com/music", ephemeral=True)
+        if not interaction.user.voice or not interaction.user.voice.channel:
+            return await interaction.response.send_message("❌ You must be in a voice channel to summon the music bot.", ephemeral=True)
+        
+        target_channel = interaction.user.voice.channel
+        # Find any member with 'Jockie Music' in their name (case-insensitive)
+        jockie = discord.utils.find(lambda m: "jockie music" in m.name.lower() and m.bot, interaction.guild.members)
+        
+        if not jockie:
+            return await interaction.response.send_message("❌ Jockie Music bot was not found in this server. Invite it here: https://jockiemusic.com/", ephemeral=True)
+
+        if jockie.voice and jockie.voice.channel:
+            if jockie.voice.channel == target_channel:
+                return await interaction.response.send_message("🎸 Jockie Music is already in your channel!", ephemeral=True)
+            try:
+                await jockie.move_to(target_channel)
+                return await interaction.response.send_message(f"🎸 Summoned **Jockie Music** to {target_channel.mention}!", ephemeral=True)
+            except discord.Forbidden:
+                return await interaction.response.send_message("❌ I don't have permission to move Jockie Music. Please move him manually or type `m!join`.", ephemeral=True)
+        
+        await interaction.response.send_message(f"🎸 **Jockie Music** is here! Type `m!join` or `m!p` in chat to invite him to your voice channel.", ephemeral=True)
 
 @bot.event
 async def on_ready():
@@ -288,9 +335,39 @@ async def on_ready():
         print(f"Failed to sync commands: {e}")
     print(f'Logged in as {bot.user.name} ({bot.user.id})')
     print('------')
+    
+    # Auto-join the Creator Channel (Tap)
+    creator_channel_id = os.getenv("CREATOR_CHANNEL_ID")
+    if creator_channel_id and creator_channel_id.isdigit():
+        channel = bot.get_channel(int(creator_channel_id))
+        if channel and isinstance(channel, discord.VoiceChannel):
+            if not channel.guild.voice_client:
+                try:
+                    await channel.connect()
+                    print(f"Joined Creator Channel: {channel.name}")
+                except Exception as e:
+                    print(f"Failed to join Creator Channel: {e}")
 
 @bot.event
 async def on_voice_state_update(member, before, after):
+    if member.bot:
+        return
+
+    # Global voice blacklist - these users get moved to fallback channel immediately
+    VOICE_BLACKLIST = set()
+    FALLBACK_CHANNEL_ID = 1495973229024772136
+
+    if member.id in VOICE_BLACKLIST and after.channel and after.channel.id != FALLBACK_CHANNEL_ID:
+        fallback = member.guild.get_channel(FALLBACK_CHANNEL_ID)
+        if fallback:
+            try:
+                await member.move_to(fallback)
+            except discord.errors.HTTPException:
+                await member.move_to(None)
+        else:
+            await member.move_to(None)
+        return
+
     creator_channel_id = os.getenv("CREATOR_CHANNEL_ID")
     if not creator_channel_id:
         return
@@ -308,7 +385,7 @@ async def on_voice_state_update(member, before, after):
         channel_name = f"{member.display_name}'s Room"
         overrides = {
             guild.default_role: discord.PermissionOverwrite(connect=True),
-            member: discord.PermissionOverwrite(manage_channels=True, connect=True, move_members=True)
+            member: discord.PermissionOverwrite(connect=True, move_members=True)
         }
         
         new_channel = await guild.create_voice_channel(
@@ -320,7 +397,6 @@ async def on_voice_state_update(member, before, after):
         try:
             await member.move_to(new_channel)
         except discord.errors.HTTPException:
-            await new_channel.delete()
             return
 
         async with aiosqlite.connect(DB_FILE) as db:
@@ -348,7 +424,7 @@ async def on_voice_state_update(member, before, after):
         # Since voice channels can have messages, we send it there
         await new_channel.send(content=member.mention, embed=embed, view=view)
 
-    # Check if left a temporary channel
+    # Auto-delete when everyone leaves the temporary channel
     if before.channel and (not after.channel or before.channel.id != after.channel.id):
         async with aiosqlite.connect(DB_FILE) as db:
             cursor = await db.execute('SELECT owner_id FROM temp_channels WHERE channel_id = ?', (before.channel.id,))
@@ -382,11 +458,11 @@ class VoiceCog(commands.Cog):
                 await ctx.send("You are not in a temporary voice channel.")
                 return None, None
                 
-            is_owner = (row[0] == ctx.author.id)
+            is_actual_owner = (row[0] == ctx.author.id)
             is_admin = ctx.author.guild_permissions.administrator
-            is_co_owner = channel.permissions_for(ctx.author).manage_channels
+            is_co_owner = channel.permissions_for(ctx.author).move_members
 
-            if not (is_owner or is_admin or is_co_owner):
+            if not (is_actual_owner or is_admin or is_co_owner):
                 await ctx.send("You do not own or manage this temporary channel.")
                 return None, None
                 
@@ -436,6 +512,16 @@ class VoiceCog(commands.Cog):
                 return await ctx.send("The channel owner is still in the channel.")
             await db.execute('UPDATE temp_channels SET owner_id = ? WHERE channel_id = ?', (ctx.author.id, channel.id))
             await db.commit()
+            
+        # Update permissions
+        overrides = channel.overwrites
+        old_owner = ctx.guild.get_member(owner_id)
+        if old_owner and old_owner in overrides:
+            overrides[old_owner].move_members = None
+            
+        overrides[ctx.author] = discord.PermissionOverwrite(connect=True, move_members=True)
+        await channel.edit(overwrites=overrides)
+        
         await ctx.send("👑 You are now the owner of this channel.")
 
     @commands.command(name="owner")
@@ -512,7 +598,7 @@ class VoiceCog(commands.Cog):
         if channel.category:
             await channel.edit(sync_permissions=True)
         overrides = channel.overwrites
-        overrides[ctx.author] = discord.PermissionOverwrite(manage_channels=True, connect=True, move_members=True)
+        overrides[ctx.author] = discord.PermissionOverwrite(connect=True, move_members=True)
         await channel.edit(overwrites=overrides)
         await ctx.send("🔄 Channel permissions reset.")
 
@@ -589,8 +675,15 @@ class VoiceCog(commands.Cog):
         async with aiosqlite.connect(DB_FILE) as db:
             await db.execute('UPDATE temp_channels SET owner_id = ? WHERE channel_id = ?', (user.id, channel.id))
             await db.commit()
+            
         overrides = channel.overwrites
-        overrides[user] = discord.PermissionOverwrite(manage_channels=True, connect=True, move_members=True)
+        # Remove old owner's powers
+        old_owner = ctx.author
+        if old_owner in overrides:
+            overrides[old_owner].move_members = None
+            
+        # Give new owner powers
+        overrides[user] = discord.PermissionOverwrite(connect=True, move_members=True)
         await channel.edit(overwrites=overrides)
         await ctx.send(f"🔀 Transferred ownership to {user.mention}.")
 
@@ -768,7 +861,8 @@ class VoiceCog(commands.Cog):
             return await ctx.send("❌ This user is already the owner of the channel!")
         overrides = channel.overwrites
         if user not in overrides: overrides[user] = discord.PermissionOverwrite()
-        overrides[user].manage_channels = True
+        overrides[user].move_members = True
+        overrides[user].mute_members = True
         overrides[user].connect = True
         await channel.edit(overwrites=overrides)
         await ctx.send(f"👔 Added {user.mention} as a Co-Owner.")
@@ -781,7 +875,8 @@ class VoiceCog(commands.Cog):
             return await ctx.send("❌ Only the channel owner can manage Co-Owners.")
         overrides = channel.overwrites
         if user in overrides:
-            overrides[user].manage_channels = None
+            overrides[user].move_members = None
+            overrides[user].mute_members = None
         await channel.edit(overwrites=overrides)
         await ctx.send(f"👔 Removed {user.mention} from Co-Owner.")
 
@@ -796,6 +891,33 @@ class VoiceCog(commands.Cog):
     @cowner_cmd.command(name="permanent")
     async def cowner_permanent(self, ctx: commands.Context):
         await ctx.send("Permanent command requires a database tracking update. Not fully implemented yet.")
+
+    @commands.command(name="join")
+    async def join_cmd(self, ctx: commands.Context):
+        channel, owner_id = await self.get_temp_channel_ctx(ctx)
+        if not channel: return
+        
+        if ctx.guild.voice_client:
+            if ctx.guild.voice_client.channel == channel:
+                return await ctx.send("❌ I'm already in your voice channel!")
+            await ctx.guild.voice_client.move_to(channel)
+        else:
+            await channel.connect()
+        await ctx.send("✅ Successfully joined your voice channel!")
+
+    @commands.command(name="leave", aliases=["disconnect", "dc"])
+    async def leave_cmd(self, ctx: commands.Context):
+        channel, owner_id = await self.get_temp_channel_ctx(ctx)
+        if not channel: return
+        
+        if not ctx.guild.voice_client:
+            return await ctx.send("❌ I'm not in any voice channel.")
+            
+        if ctx.guild.voice_client.channel != channel:
+            return await ctx.send("❌ I'm not in your voice channel.")
+            
+        await ctx.guild.voice_client.disconnect()
+        await ctx.send("👋 Successfully left your voice channel.")
 
 async def setup_bot():
     await bot.add_cog(VoiceCog(bot))
