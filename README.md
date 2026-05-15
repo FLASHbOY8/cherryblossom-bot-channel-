@@ -24,6 +24,9 @@
 | 🎸 **Music** | Summon Muziq | One-click button to summon Jockie Music into your voice channel |
 | 💎 **Pro Responses** | Styled Embeds | Every command response is wrapped in a premium dark-themed embed |
 | 🔒 **Security** | Owner Immunity | The primary owner is immune to moderation actions from co-owners |
+| 💾 **Database** | Persistent Storage | SQLite-powered storage for user stats, persistent blacklists, and whitelists |
+| 📩 **Mass DM** | Automated Messaging | Secure, rate-limited broadcast messaging with clean delivery logic |
+| 🎨 **Anime UI** | Premium Aesthetics | Vibrant, role-coded interactive buttons with Cherry Blossom Pink themes |
 
 ---
 
@@ -136,10 +139,13 @@ All commands use the prefix `.v`
 | Command | Description |
 |---------|-------------|
 | `.v info` | Shows channel statistics |
+| `.v mystats` | Shows your voice channel creation statistics |
 | `.v reset` | Resets all channel permissions |
 | `.v soundboard` | Toggles soundboard on/off |
 | `.v join` | Bot joins your voice channel |
 | `.v leave` | Bot leaves your voice channel |
+| `.v bllist` | Displays your active blacklist |
+| `.v wllist` | Displays your active whitelist |
 
 ---
 
@@ -154,7 +160,7 @@ When a user creates a voice channel, they receive an interactive control panel w
 | 👑 | Claim channel |
 | 🚫 / 👁️ | Hide / Unhide |
 | ➕ / ➖ | Increase / Decrease limit |
-| 👑 Owner | Owner-only menu (delete channel) |
+| 👑 Owner | Owner-only menu |
 | ✏️ | Rename channel |
 | ❓ Help | Full command guide |
 | 📜 Rules | Server rules link |
